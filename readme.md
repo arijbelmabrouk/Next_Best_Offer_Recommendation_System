@@ -1,86 +1,68 @@
-# Customer Offer Recommendation System
+# Sparse Manifold Learning via SOM
 
-## Overview
-This system analyzes customer usage patterns from network data and recommends personalized offers based on a Self-Organizing Map (SOM) machine learning model. The system processes customer behavioral data (like browsing patterns, protocol usage, and data consumption) to group similar customers and suggest appropriate service offers.
+Topology-preserving mapping of high-dimensional sparse telecom data (DPI bitmaps → sparse vectors) using Self-Organizing Maps for non-convex quantization error minimization.
 
-## Features
-- Customer behavior clustering using Self-Organizing Maps (SOM)
-- Bitmap encoding for categorical features (DPI policies, content types, IP protocols)
-- Data preprocessing and normalization
-- Recommendation storage in SQLite database
-- Batch processing for large datasets
-- CSV export functionality
+## SOM Optimization Dynamics
 
-## Requirements
-- Python 3.6+
-- pandas
-- numpy
-- joblib
-- sqlite3
-- tqdm
-- minisom
+**Best Matching Unit**: \(c(t) = \arg\min_j \|\mathbf{x}(t) - \mathbf{w}_j(t)\|_2\)
+
+**Weight Update**: \(\mathbf{w}_j(t+1) = \mathbf{w}_j(t) + \alpha(t) h_{c,j}(r(t)) (\mathbf{x}(t) - \mathbf{w}_j(t))\)
+
+- Learning rate: \(\alpha(t) = \frac{\alpha_0}{1 + t/\tau}\)
+- Gaussian neighborhood: \(h_{c,j}(r) = \exp(-r^2 / 2\sigma(t)^2)\)
+- Shrinking radius: \(r(t) = r_0 (1 - t/T)\)
+
+**vs. Alternatives**:
+| Method | Complexity | Topology Preservation | Scalability |
+|--------|------------|----------------------|-------------|
+| SOM    | \(O(n \cdot grid)\) | Non-linear manifolds | Batch-friendly |
+| PCA    | \(O(d^2 n)\) | Linear only | Single pass |
+| t-SNE  | \(O(n^2)\) | Non-linear | Small data only |
+
+## Feature Sparsification Pipeline
+
+Bitmap encoding sparsifies categorical lists (DPI policies, content types, IP protocols) → sparse binary vectors. Median imputation + z-score scaling for numerical features.
+
+**Input**: Parquet with `SubscriberID`, `DpiPolicy[list]`, `contentType[list]`, `bytesFromClient/Server`, `sessions_count`, `transactionDuration`.
 
 ## File Structure
-```
+
 ├── models2/
-│   ├── som_model.joblib         # Primary SOM model file
-│   ├── cluster_offers.joblib    # Cluster to offer mapping
-│   ├── policy_to_bit.joblib     # DPI policy encoding map
-│   ├── content_to_bit.joblib    # Content type encoding map
-│   ├── proto_to_bit.joblib      # IP protocol encoding map
-│   ├── scaler.joblib            # Feature scaling model
-│   ├── medians.joblib           # Median values for missing data imputation
-│   └── numeric_cols.joblib      # List of numeric columns used in training
+│ ├── som_model.joblib # SOM weights
+│ ├── cluster_offers.joblib # Node → offer mapping
+│ ├── policy_to_bit.joblib # DPI encoding
+│ ├── content_to_bit.joblib # Content encoding
+│ ├── proto_to_bit.joblib # Protocol encoding
+│ ├── scaler.joblib # Standardization
+│ ├── medians.joblib # Imputation
+│ └── numeric_cols.joblib # Numeric features
+├── notebook.ipynb # Derivations + full pipeline
+├── main_sub1.py # Single inference
+├── main_sub_multi.py # Batch processing
 ├── Dockerfile
-├── main_sub_multi.py #API code implementation for batch of customers
-├── main_sub1.py #API code implementation for one customer
-└── notebook.ipynb #Notebook having all steps of data preparation and modeling
-```
+└── results/ # U-matrix, quantization error decay
 
-## Input Data Format
-The system expects a parquet file with the following fields:
-- `SubscriberID`: Unique identifier for each customer
-- `DpiPolicy`: List of DPI policies used
-- `contentType`: List of content types accessed
-- `IpProtocol`: List of IP protocols used
-- `appName`: List of applications used
-- `bytesFromClient`: Upload data volume
-- `bytesFromServer`: Download data volume
-- `sessions_count`: Number of network sessions
-- `transationDuration`: Total duration of sessions
+text
 
-## How It Works
-1. **Data Loading**: Loads customer data from parquet file
-2. **Preprocessing**: 
-   - Converts categorical lists to bitmap encodings
-   - Scales numerical features
-   - Handles missing values
-3. **Recommendation**:
-   - Maps customer to nearest SOM node
-   - Retrieves pre-assigned offers for that node
-   - Falls back to default offers if needed
-4. **Storage**:
-   - Saves recommendations to SQLite database
-   - Optionally exports to CSV
+## Core Functions
 
-## Key Functions
-- `load_models()`: Loads all required ML models and mappings
-- `recommend_nbo()`: Core recommendation function using SOM
-- `preprocess_customer_data()`: Prepares raw customer data for the model
-- `process_all_customers()`: Processes the entire dataset in batches
-- `export_to_csv()`: Exports recommendations to CSV format
+- `load_models()`: Loads SOM + preprocessing pipeline
+- `recommend_nbo()`: SOM distance → cluster → offer mapping
+- `preprocess_customer_data()`: Bitmap sparsification + scaling
+- `process_all_customers()`: Batch manifold projection
 
-## Default Recommendations
-If a customer has insufficient data or their cluster has no assigned offers, the system falls back to these default offers:
-- F3000G100M
-- F1200G50M
-- F3000G200M
+## Usage
 
-## Performance Considerations
-- Uses batch processing to handle large customer datasets
-- Commits database transactions periodically to prevent memory issues
-- Shows progress bar for long-running operations
+python main_sub_multi.py # Batch → SQLite/CSV
 
-## Maintenance
-- Models can be retrained as customer behavior evolves
-- Cluster-to-offer mappings should be updated when new offers are available
+text
+
+**Output**: Recommendations with fallbacks (F3000G100M, F1200G50M, F3000G200M)
+
+## Performance
+
+Batch processing with tqdm progress, periodic SQLite commits for \(10^6+\) customers.
+
+## License
+
+MIT
