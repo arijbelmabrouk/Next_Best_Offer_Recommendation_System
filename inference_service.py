@@ -11,7 +11,7 @@ import os
 # === Create FastAPI app ===
 app = FastAPI(
     title="Manifold Projection Service",
-    description="API for recommending next best offers based on customer features",
+    description="Topological projection of high-dimensional network signatures into latent manifold spaces for structural analysis.",
     version="1.0.0"
 )
 
@@ -195,4 +195,4 @@ def read_root():
 
 # === Run the API server when this script is executed directly ===
 if __name__ == "__main__":
-    uvicorn.run("Zm:app", host="0.0.0.0", port=8005, reload=True)
+    uvicorn.run("inference_service:app", host="0.0.0.0", port=8005, reload=True)
