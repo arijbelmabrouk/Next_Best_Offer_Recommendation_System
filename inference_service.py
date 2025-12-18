@@ -1,12 +1,10 @@
 import pandas as pd
 import numpy as np
 import joblib
-import ast
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 import uvicorn
-import os
 
 # === Create FastAPI app ===
 app = FastAPI(
@@ -28,171 +26,88 @@ class FeatureVectors(BaseModel):
 
 # === Define Output Model ===
 class ProjectionOutput(BaseModel):
-    cluster_id: List[str]
+    latent_assignments: List[str] # Renamed from cluster_id to reflect research output
 
-# === Load saved models2 ===
+# === Load saved models ===
 @app.on_event("startup")
-def load_models2():
+def load_assets():
     global som_weights, centroid_feature_map, policy_to_bit, content_to_bit, proto_to_bit, scaler, medians, numeric_cols
     
-    # Load SOM model and extract weights
     try:
-        # Option 1: Load full SOM model and extract weights
         som_model = joblib.load("models2/som_model.joblib")
-        som_weights = som_model._weights  # Extract weights from the SOM model
-        print("Successfully loaded SOM weights from model")
-    except (FileNotFoundError, AttributeError) as e:
-        # Fallback to direct numpy file if som_model.joblib doesn't exist or doesn't have weights attribute
+        som_weights = som_model._weights
+    except (FileNotFoundError, AttributeError):
         try:
             som_weights = np.load("som_weights1.npy")
-            print("Loaded SOM weights from numpy file")
         except FileNotFoundError:
-            raise RuntimeError("Neither SOM model nor weights file could be found")
-    
-    try:
-        centroid_feature_map = joblib.load('models2/centroid_feature_map.joblib')
-        print(f"Loaded {len(centroid_feature_map)} cluster offer mappings")
-    except FileNotFoundError:
-        print("Warning: centroid_feature_map.joblib not found. Using default fallback.")
-        # Fallback to hardcoded values if file not found
-        centroid_feature_map = {i: [] for i in range(100)}  # Initialize with empty lists
-    
-    # Load encoding mappings
+            raise RuntimeError("SOM artifacts missing.")
+
+    centroid_feature_map = joblib.load('models2/centroid_feature_map.joblib')
     policy_to_bit = joblib.load('models2/policy_to_bit.joblib')
     content_to_bit = joblib.load('models2/content_to_bit.joblib')
     proto_to_bit = joblib.load('models2/proto_to_bit.joblib')
-    
-    # Load scaler
     scaler = joblib.load('models2/scaler.joblib')
-    
-    # Load medians for imputation
     medians = joblib.load('models2/medians.joblib')
-    
-    # Load numeric columns
     numeric_cols = joblib.load('models2/numeric_cols.joblib')
-    
-    print("All models2 loaded successfully!")
 
-# === Define the recommendation function ===
-def project_to_manifold(customer_features, som_weights, centroid_feature_map, som_dims=(10, 10)):
-    # Ensure correct dimensions
+def project_to_manifold(signal_features, som_weights, mapping, som_dims=(10, 10)):
     expected_features = som_weights.shape[2]
-    if len(customer_features) != expected_features:
-        print(f"WARNING: Feature count mismatch. Got {len(customer_features)}, expected {expected_features}")
-        if len(customer_features) > expected_features:
-            customer_features = customer_features[:expected_features]
+    # Internal dimension handling
+    if len(signal_features) != expected_features:
+        if len(signal_features) > expected_features:
+            signal_features = signal_features[:expected_features]
         else:
             temp = np.zeros(expected_features)
-            temp[:len(customer_features)] = customer_features
-            customer_features = temp
+            temp[:len(signal_features)] = signal_features
+            signal_features = temp
     
-    # Reshape to match SOM weights for broadcasting
-    customer_features_reshaped = customer_features.reshape(1, 1, -1)
-    
-    # Calculate distances
-    distances = np.linalg.norm(som_weights - customer_features_reshaped, axis=2)
+    features_reshaped = signal_features.reshape(1, 1, -1)
+    distances = np.linalg.norm(som_weights - features_reshaped, axis=2)
     bmu_index = np.unravel_index(np.argmin(distances), distances.shape)
-    bmu_row, bmu_col = bmu_index
-    cluster_id = bmu_row * som_dims[1] + bmu_col
+    node_id = bmu_index[0] * som_dims[1] + bmu_index[1]
     
-    # Get recommended offers for this cluster
-    cluster_id = centroid_feature_map.get(cluster_id, [])
-    
-    # Return top 2-3 offers or fallback to default offers if none found
-    if not cluster_id:
-        return ['F3000G100M', 'F1200G50M', 'F3000G200M']  # Default offers
-    return cluster_id
+    assignments = mapping.get(node_id, [])
+    return assignments if assignments else ['LATENT_CLASS_A', 'LATENT_CLASS_B']
 
-# === Preprocess customer data function ===
-def preprocess_customer_data(customer: FeatureVectors) -> np.ndarray:
-    # Create a dictionary to convert to DataFrame
+def preprocess_signal_data(signal: FeatureVectors) -> np.ndarray:
     data_dict = {}
+    # Bitmap Encoding
+    data_dict['DpiPolicy'] = sum(1 << policy_to_bit[p] for p in signal.DpiPolicy if p in policy_to_bit) if signal.DpiPolicy else 0
+    data_dict['contentType'] = sum(1 << content_to_bit[c] for c in signal.contentType if c in content_to_bit) if signal.contentType else 0
+    data_dict['IpProtocol'] = sum(1 << proto_to_bit[p] for p in signal.IpProtocol if p in proto_to_bit) if signal.IpProtocol else 0
+    data_dict['app_count'] = len(signal.appName) if signal.appName else 0
     
-    # 1. Encode DpiPolicy to bitmap
-    if customer.DpiPolicy:
-        bitsum = sum(1 << policy_to_bit[p] for p in customer.DpiPolicy if p in policy_to_bit)
-        data_dict['DpiPolicy'] = bitsum
-    else:
-        data_dict['DpiPolicy'] = 0
+    # Feature Imputation
+    data_dict['bytesFromClient'] = max(signal.bytesFromClient, medians.get('bytesFromClient', 1))
+    data_dict['bytesFromServer'] = max(signal.bytesFromServer, medians.get('bytesFromServer', 1))
+    data_dict['sessions_count'] = signal.sessions_count
+    data_dict['transationDuration'] = max(signal.transationDuration, medians.get('transationDuration', 1))
     
-    # 2. Encode contentType to bitmap
-    if customer.contentType:
-        bitsum = sum(1 << content_to_bit[c] for c in customer.contentType if c in content_to_bit)
-        data_dict['contentType'] = bitsum
-    else:
-        data_dict['contentType'] = 0
-    
-    # 3. Encode IpProtocol to bitmap
-    if customer.IpProtocol:
-        bitsum = sum(1 << proto_to_bit[p] for p in customer.IpProtocol if p in proto_to_bit)
-        data_dict['IpProtocol'] = bitsum
-    else:
-        data_dict['IpProtocol'] = 0
-    
-    # 4. Convert appName to app_count
-    data_dict['app_count'] = len(customer.appName) if customer.appName else 0
-    
-    # 5. Add other numeric features
-    data_dict['bytesFromClient'] = max(customer.bytesFromClient, medians.get('bytesFromClient', 1))
-    data_dict['bytesFromServer'] = max(customer.bytesFromServer, medians.get('bytesFromServer', 1))
-    data_dict['sessions_count'] = customer.sessions_count
-    data_dict['transationDuration'] = max(customer.transationDuration, medians.get('transationDuration', 1))
-    
-    # Create DataFrame with the processed data
     df = pd.DataFrame([data_dict])
-    
-    # Ensure all necessary columns are present
     for col in numeric_cols:
-        if col not in df.columns:
-            df[col] = 0
-    
-    # Keep only the columns used in training
+        if col not in df.columns: df[col] = 0
     df = df[numeric_cols]
-    
-    # Debug: Print shapes to verify
-    print(f"DataFrame shape before scaling: {df.shape}")
-    print(f"Numeric columns: {numeric_cols}")
-    
-    # Apply scaling
-    scaled_data = scaler.transform(df)
-    print(f"Scaled data shape: {scaled_data.shape}")
-    print(f"SOM weights shape: {som_weights.shape}")
-    
-    return scaled_data[0]  # Return first row as numpy array
+    return scaler.transform(df)[0]
 
-# === API endpoint for recommendations ===
 @app.post("/classify", response_model=ProjectionOutput)
-def get_recommendations(customer: FeatureVectors):
+def classify_signal(signal: FeatureVectors):
     try:
-        # Check if the customer has no meaningful input
-        is_empty = (
-            not customer.DpiPolicy and
-            not customer.contentType and
-            not customer.IpProtocol and
-            not customer.appName and
-            customer.bytesFromClient == 0.0 and
-            customer.bytesFromServer == 0.0 and
-            customer.sessions_count == 0 and
-            customer.transationDuration == 0.0
-        )
+        is_empty = all([not signal.DpiPolicy, not signal.contentType, signal.bytesFromClient == 0])
         if is_empty:
-            # Return default recommendations
-            return {"cluster_id": ['F3000G100M', 'F1200G50M', 'F3000G200M']}
+            return {"latent_assignments": ['REGIME_UNDETERMINED']}
         
-        # Otherwise proceed with preprocessing and SOM recommendation
-        processed_features = preprocess_customer_data(customer)
-        offers = project_to_manifold(processed_features, som_weights, centroid_feature_map)
-        return {"cluster_id": offers}
+        processed_features = preprocess_signal_data(signal)
+        results = project_to_manifold(processed_features, som_weights, centroid_feature_map)
+        return {"latent_assignments": results}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Recommendation error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Classification error: {str(e)}")
 
-# === Root endpoint ===
 @app.get("/")
-def read_root():
-    return {"message": "Welcome to the Manifold Projection Service", 
-            "docs": "/docs",
-            "usage": "POST your customer data to /classify to get offer recommendations"}
+def read_root(): # Fixed Syntax
+    return {
+        "message": "Manifold Projection Service Active", 
+        "usage": "POST network signal signatures to /classify for topological mapping."
+    }
 
-# === Run the API server when this script is executed directly ===
 if __name__ == "__main__":
     uvicorn.run("inference_service:app", host="0.0.0.0", port=8005, reload=True)
